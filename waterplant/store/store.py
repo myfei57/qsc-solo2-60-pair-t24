@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 
 class Store:
@@ -53,6 +55,35 @@ class Store:
         with self._lock:
             self._data[key] = value
             self._save_locked()
+
+    def put_many(self, values: dict[str, str]) -> None:
+        """Persist several keys in one atomic document replacement."""
+
+        with self._lock:
+            for key, value in values.items():
+                self._data[key] = value
+            if values:
+                self._save_locked()
+
+    @contextmanager
+    def transaction(self) -> Iterator["Store"]:
+        """Hold the store lock and persist all mutations once on clean exit."""
+
+        with self._lock:
+            yield self
+            self._save_locked()
+
+    def get_locked(self, key: str) -> tuple[str, bool]:
+        return self.get(key)
+
+    def raw_locked(self, key: str, default: str) -> str:
+        return self._data.get(key, default)
+
+    def set_locked(self, key: str, value: str) -> None:
+        self._data[key] = value
+
+    def has_locked(self, key: str) -> bool:
+        return key in self._data
 
     def delete(self, key: str) -> None:
         with self._lock:

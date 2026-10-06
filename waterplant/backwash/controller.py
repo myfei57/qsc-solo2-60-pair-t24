@@ -7,7 +7,10 @@ console can replay or discard pending work.
 
 from __future__ import annotations
 
-from waterplant.filter import Bank
+import json
+
+from waterplant.filter.bank import Bank
+from waterplant.filter.report import BANK_KEY
 from waterplant.store.commands import append_command, clear_commands, load_commands
 from waterplant.store.store import Store
 
@@ -16,6 +19,7 @@ from .schedule import now_unix
 
 COMMAND_KEY = "backwash:commands"
 DRAIN_KEY_PREFIX = "backwash:drain:"
+MARKER_KEY_PREFIX = "backwash:cycle-marker:"
 SPILL_KEY = "backwash:spill"
 
 
@@ -27,10 +31,40 @@ class Controller:
         self._store = store
 
     def start(self, bed_id: str) -> None:
-        """Close the bed and only then open its drain."""
+        """Close the bed and only then open its drain, in one persisted batch."""
 
+        self.start_idempotent(bed_id, f"standalone:{bed_id}")
+
+    def start_idempotent(self, bed_id: str, key: str) -> bool:
+        """Close and drain a bed once for the supplied cycle step key."""
+
+        marker_key = f"{MARKER_KEY_PREFIX}{key}"
+        if self._store.get(marker_key)[1]:
+            self._bank.close(bed_id)
+            return False
+        with self._store.transaction() as store:
+            return self.prepare_idempotent(bed_id, key, store)
+
+    def prepare_idempotent(
+        self, bed_id: str, key: str, store: Store, marker_key: str | None = None
+    ) -> bool:
+        """Prepare the bed and writes inside the caller's held store transaction."""
+
+        marker_key = marker_key or f"{MARKER_KEY_PREFIX}{key}"
+        if store.has_locked(marker_key):
+            self._bank.close(bed_id)
+            return False
         self._bank.close(bed_id)
-        self._drain(bed_id)
+        drain_key = f"{DRAIN_KEY_PREFIX}{bed_id}"
+        if not self._bank.is_closed(bed_id):
+            store.set_locked(SPILL_KEY, "true")
+        store.set_locked(drain_key, str(now_unix()))
+        store.set_locked(marker_key, bed_id)
+        store.set_locked(
+            BANK_KEY,
+            json.dumps([bed.snapshot() for bed in self._bank.beds()], ensure_ascii=False),
+        )
+        return True
 
     def _drain(self, bed_id: str) -> None:
         if not self._bank.is_closed(bed_id):

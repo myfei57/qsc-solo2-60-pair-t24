@@ -1,62 +1,63 @@
-"""One full treatment control cycle."""
+"""One full, durable treatment control cycle."""
 
 from __future__ import annotations
 
+from waterplant.chlor import validate_demand
 from waterplant.clearwell import validate_level
+from waterplant.cycle import CycleError, CycleManager, STATUS_COMPLETED
 from waterplant.filter import validate_zone
 from waterplant.flow import validate_factor
-from waterplant.intake import Sensor, mix, validate_flow
+from waterplant.intake import validate_flow
 from waterplant.quota import validate_amount
 
-from .http import Request, Response, json_response
+from .http import Request, RequestError, Response, json_response
 from .runtime import Runtime
 
 
 def run_cycle(rt: Runtime, request: Request) -> Response:
-    """Walk the whole line once, in production order."""
+    """Start a cycle whose completed steps are durably recorded."""
 
-    flow = request.float_field("flow")
-    samples = request.float_list("samples")
-    demand = request.float_field("demand")
-    level = request.float_field("level")
-    bed_id = request.str_field("bed_id")
-    zone = request.int_field("zone")
-    amount = request.float_field("amount")
-
-    validate_flow(flow)
+    validate_flow(request.float_field("flow"))
+    request.float_list("samples")
+    validate_demand(request.float_field("demand"))
     validate_factor(rt.calibration.current())
-    validate_zone(zone)
-    validate_amount(amount)
-    validate_level(level)
+    validate_zone(request.int_field("zone"))
+    validate_amount(request.float_field("amount"))
+    validate_level(request.float_field("level"))
 
-    rt.flow_repository.record(Sensor(flow=flow, turbidity=mix(samples)))
-    rt.trend.record(flow)
-    coag_dose = rt.coag_doser.update_flow_and_dose(flow)
-    turb_dose = rt.sampler.judge(samples)
-    ph_verdict = rt.stabilizer.stabilize()
-    rt.well.update_residual_demand(demand)
-    chlor_dose = rt.chlor_doser.apply_residual() if ph_verdict.stable else 0.0
-    min_level = rt.well.adjust_level(level, rt.inlet, rt.outlet)
-    rotation = rt.backwash.order_rotation()
-    duty = rt.bank.on_duty()
-    if bed_id:
-        rt.backwash.start(bed_id)
-    quota_value = rt.accumulator.add(amount)
+    manager = CycleManager(rt)
+    try:
+        state = manager.start(dict(request.payload))
+    except CycleError as exc:
+        raise RequestError(409, str(exc)) from exc
+    status = 200 if state["status"] == STATUS_COMPLETED else 409
+    return json_response(manager.response_payload(state), status=status)
 
-    return json_response(
-        {
-            "coag_dose": coag_dose,
-            "turb_dose": turb_dose,
-            "chlor_dose": chlor_dose,
-            "min_level": min_level,
-            "level": rt.well.level(),
-            "quota": quota_value,
-            "rotation": rotation,
-            "on_duty": duty or "",
-            "backwash": bed_id,
-            "drains": rt.backwash.drain_count(),
-            "audit_count": rt.auditor.count(),
-            "ph_stable": ph_verdict.stable,
-            "ph_adjustment": ph_verdict.adjustment,
-        }
-    )
+
+def get_cycle(rt: Runtime) -> Response:
+    """Return the current cycle checkpoint, including every step result."""
+
+    manager = CycleManager(rt)
+    state = manager.get()
+    if state is None:
+        return json_response({"present": False}, status=404)
+    return json_response(manager.response_payload(state))
+
+
+def get_cycle_history(rt: Runtime) -> Response:
+    """List retained completed cycles; partial cycles are never discarded."""
+
+    manager = CycleManager(rt)
+    return json_response({"cycles": [manager.response_payload(state) for state in manager.history()]})
+
+
+def recover_cycle(rt: Runtime, request: Request) -> Response:
+    """Resume an interrupted cycle after explicit duty-operator confirmation."""
+
+    manager = CycleManager(rt)
+    try:
+        state = manager.recover(dict(request.payload))
+    except CycleError as exc:
+        raise RequestError(409, str(exc)) from exc
+    status = 200 if state["status"] == STATUS_COMPLETED else 409
+    return json_response(manager.response_payload(state), status=status)

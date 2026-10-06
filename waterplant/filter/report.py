@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+BANK_KEY = "filter:bank"
+
 
 @dataclass(frozen=True)
 class BedState:

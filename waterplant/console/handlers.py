@@ -22,7 +22,7 @@ from . import describe as describe_module
 from . import simulate as simulate_module
 from . import snapshot as snapshot_module
 from . import telemetry as telemetry_module
-from .cycle import run_cycle
+from .cycle import get_cycle, get_cycle_history, recover_cycle, run_cycle
 from .http import Request, Response, csv_response, json_response, text_response
 from .report import text_report
 from .routes import route_table
@@ -281,6 +281,18 @@ def audit_filter(server: "Server", request: Request) -> Response:
 
 def cycle(server: "Server", request: Request) -> Response:
     return run_cycle(server.runtime, request)
+
+
+def cycle_state(server: "Server", request: Request) -> Response:
+    return get_cycle(server.runtime)
+
+
+def cycle_history(server: "Server", request: Request) -> Response:
+    return get_cycle_history(server.runtime)
+
+
+def cycle_recover(server: "Server", request: Request) -> Response:
+    return recover_cycle(server.runtime, request)
 
 
 def simulate(server: "Server", request: Request) -> Response:

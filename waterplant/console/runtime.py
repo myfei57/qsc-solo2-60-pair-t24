@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import threading
+
 from waterplant.audit import Auditor
 from waterplant.backwash import Controller
 from waterplant.chlor import Doser as ChlorDoser
 from waterplant.clearwell import Well
 from waterplant.coag import Doser as CoagDoser
-from waterplant.filter import Bank
+from waterplant.filter import PersistentBank
 from waterplant.flow import Calibration
 from waterplant.intake import FlowRepository, InletController, Trend
 from waterplant.inventory import Inventory
@@ -22,7 +24,8 @@ class Runtime:
     """Owns one instance of each control component for a single store."""
 
     def __init__(self, store: Store) -> None:
-        bank = Bank()
+        self.cycle_lock = threading.RLock()
+        bank = PersistentBank(store)
         coag_doser = CoagDoser(store)
         self.store = store
         self.flow_repository = FlowRepository(store)

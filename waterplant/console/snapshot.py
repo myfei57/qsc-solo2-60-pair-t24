@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from waterplant.cycle import CycleManager
 from waterplant.ns import treatment_line
 from waterplant.store import store_state
 
@@ -11,8 +12,10 @@ from .runtime import Runtime
 def collect(rt: Runtime) -> dict[str, object]:
     """Combine every component projection into one document."""
 
+    state = CycleManager(rt).get()
     return {
         "pipeline": [step.as_dict() for step in treatment_line().steps()],
+        "cycle": "absent" if state is None else CycleManager(rt).response_payload(state),
         "store": store_state(rt.store).as_dict(),
         "intake": rt.flow_repository.state().as_dict(),
         "coag": rt.coag_doser.state().as_dict(),

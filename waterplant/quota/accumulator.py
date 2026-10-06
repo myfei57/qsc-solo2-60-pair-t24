@@ -20,6 +20,22 @@ class Accumulator:
     def add(self, amount: float) -> float:
         return advance_epoch(self._store, ACCUM_KEY, amount, EPOCH_CAP)
 
+    def add_idempotent(self, amount: float, key: str) -> tuple[float, bool]:
+        """Add once for ``key``; replay returns the previously metered value."""
+
+        marker_key = f"quota:marker:{key}"
+        with self._store.transaction() as store:
+            raw, present = store.get_locked(marker_key)
+            if present:
+                return float(raw), False
+            current = float(store.raw_locked(ACCUM_KEY, "0.0"))
+            next_value = current + amount
+            if EPOCH_CAP > 0 and next_value >= EPOCH_CAP:
+                next_value -= EPOCH_CAP
+            store.set_locked(ACCUM_KEY, f"{next_value:.4f}")
+            store.set_locked(marker_key, f"{next_value:.4f}")
+        return float(f"{next_value:.4f}"), True
+
     def value(self) -> float:
         value, _ = load_float(self._store, ACCUM_KEY)
         return value

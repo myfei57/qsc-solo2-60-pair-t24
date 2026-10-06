@@ -11,7 +11,7 @@ from waterplant.chlor import Doser as ChlorDoser
 from waterplant.chlor import validate_demand
 from waterplant.clearwell import Well, validate_level
 from waterplant.coag import Doser as CoagDoser
-from waterplant.filter import Bank, validate_zone
+from waterplant.filter import Bank, PersistentBank, validate_zone
 from waterplant.flow import Calibration, calibrate_meter, validate_factor
 from waterplant.intake import FlowRepository, InletController, Sensor, mix, validate_flow
 from waterplant.intake import Trend
@@ -60,6 +60,14 @@ class StoreCase(unittest.TestCase):
             self.assertEqual(load_commands(store, "list"), ["one", "two"])
             clear_commands(store, "list")
             self.assertEqual(load_commands(store, "list"), [])
+
+    def test_batch_put_persists_all_keys_together(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            store.put_many({"one": "1", "two": "2"})
+            reopened = Store.open(f"{tmp}/state.json")
+            self.assertEqual(reopened.get("one"), ("1", True))
+            self.assertEqual(reopened.get("two"), ("2", True))
 
     def test_epoch_wraps_and_stays_positive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -136,6 +144,17 @@ class DosingCase(unittest.TestCase):
             self.assertEqual(doser.state().persisted_flow, 20.0)
             self.assertIn("coagulant", doser.describe())
 
+    def test_idempotent_coagulant_dose_replays_without_second_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            doser = CoagDoser(store)
+            dose, applied = doser.update_flow_and_dose_idempotent(8.0, "step-coag")
+            self.assertEqual((dose, applied), (8.0, True))
+            replay, reapplied = doser.update_flow_and_dose_idempotent(99.0, "step-coag")
+            self.assertEqual((replay, reapplied), (8.0, False))
+            self.assertEqual(Auditor(store).totals(), {"coagulant": 8.0})
+            self.assertEqual(FlowRepository(store).load_flow(), (8.0, True))
+
     def test_coagulant_ratio_tracks_calibration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = Store.open(f"{tmp}/state.json")
@@ -156,6 +175,17 @@ class DosingCase(unittest.TestCase):
             self.assertEqual(doser.apply_residual(), 1.0)
             self.assertEqual(doser.target_for_demand(0.0), 0.3)
             self.assertIn("chlorine", doser.describe())
+
+    def test_idempotent_chlorine_dose_replays_without_second_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            doser = ChlorDoser(store)
+            dose, applied = doser.apply_residual_idempotent(1.25, "step-chlor")
+            self.assertEqual((dose, applied), (1.25, True))
+            replay, reapplied = doser.apply_residual_idempotent(9.0, "step-chlor")
+            self.assertEqual((replay, reapplied), (1.25, False))
+            self.assertEqual(Auditor(store).totals(), {"chlorine": 1.25})
+            self.assertEqual(Well(store).residual_target(), 1.25)
 
     def test_demand_validation(self) -> None:
         validate_demand(0.0)
@@ -246,6 +276,16 @@ class FilterCase(unittest.TestCase):
         bank.remove_bed("b1")
         self.assertEqual(bank.count(), 2)
 
+    def test_persistent_bank_restores_bed_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = f"{tmp}/state.json"
+            bank = PersistentBank(Store.open(path))
+            bank.add_bed("b1", 1, 4.0)
+            bank.close("b1")
+            restored = PersistentBank(Store.open(path))
+            self.assertTrue(restored.is_closed("b1"))
+            self.assertEqual(restored.bed_zone("b1"), (1, True))
+
     def test_unknown_bed_raises(self) -> None:
         bank = Bank()
         with self.assertRaises(ValueError):
@@ -279,6 +319,17 @@ class BackwashCase(unittest.TestCase):
             self.assertEqual(controller.drain_count(), 1)
             self.assertEqual(controller.last_drain(), "b1")
             self.assertIn("commands=0", controller.describe())
+
+    def test_cycle_backwash_start_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            bank = Bank()
+            bank.add_bed("b1", 1, 4.0)
+            controller = Controller(bank, store)
+            self.assertTrue(controller.start_idempotent("b1", "cycle-1:filter"))
+            self.assertFalse(controller.start_idempotent("b1", "cycle-1:filter"))
+            self.assertEqual(controller.drain_count(), 1)
+            self.assertTrue(bank.is_closed("b1"))
 
     def test_queue_replay_and_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,6 +373,15 @@ class QuotaCase(unittest.TestCase):
             accumulator.reset()
             self.assertEqual(accumulator.value(), 0.0)
             self.assertIn("quota accumulator", accumulator.describe())
+
+    def test_idempotent_quota_addition_replays_without_double_metering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            accumulator = Accumulator(Store.open(f"{tmp}/state.json"))
+            first, applied = accumulator.add_idempotent(12.0, "step-quota")
+            self.assertEqual((first, applied), (12.0, True))
+            replay, reapplied = accumulator.add_idempotent(99.0, "step-quota")
+            self.assertEqual((replay, reapplied), (12.0, False))
+            self.assertEqual(accumulator.value(), 12.0)
 
     def test_check_quota_and_validation(self) -> None:
         quota = Quota(chemical="chlorine", limit=100.0)
@@ -373,6 +433,17 @@ class PhCase(unittest.TestCase):
             self.assertAlmostEqual(verdict.adjustment, -0.5)
             self.assertIn("ph value", stabilizer.describe())
             self.assertFalse(stabilizer.state().stable)
+
+    def test_idempotent_entries_are_recorded_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            auditor = Auditor(Store.open(f"{tmp}/state.json"))
+            first = auditor.record_idempotent("chlorine", "1.5000", "cycle-1:chlor")
+            duplicate = auditor.record_idempotent("chlorine", "9.0000", "cycle-1:chlor")
+            self.assertIsNotNone(first)
+            self.assertIsNone(duplicate)
+            self.assertEqual(auditor.count(), 1)
+            self.assertEqual(auditor.last().detail, "1.5000")
+            self.assertEqual(auditor.last().key, "cycle-1:chlor")
 
     def test_ph_validation(self) -> None:
         validate_ph(7.0)
@@ -494,7 +565,7 @@ class ReportingCase(unittest.TestCase):
             auditor = Auditor(Store.open(f"{tmp}/state.json"))
             auditor.record("coagulant", "2.0000")
             columns, rows = audit_export(auditor)
-            self.assertEqual(columns, ["time", "kind", "detail", "id"])
+            self.assertEqual(columns, ["time", "kind", "detail", "id", "key"])
             self.assertEqual(rows[0][1], "coagulant")
             self.assertEqual(rows[0][2], "2.0000")
 

@@ -53,6 +53,7 @@ class ConsoleCase(unittest.TestCase):
             set(snapshot),
             {
                 "pipeline",
+                "cycle",
                 "store",
                 "intake",
                 "coag",
@@ -207,6 +208,11 @@ class ConsoleCase(unittest.TestCase):
         status, body = self.call("POST", "/audit/filter", {"kind": "chlorine"})
         self.assertEqual(len(body["entries"]), 1)
 
+    def test_cycle_checkpoint_absent_before_start(self) -> None:
+        status, body = self.call("GET", "/cycle")
+        self.assertEqual(status, 404)
+        self.assertFalse(body["present"])
+
     def test_cycle_and_simulation(self) -> None:
         self.call("POST", "/filter/add", {"id": "b1", "zone": 1, "load": 3.0})
         status, body = self.call(
@@ -228,9 +234,31 @@ class ConsoleCase(unittest.TestCase):
         self.assertEqual(body["chlor_dose"], 0.65)
         self.assertEqual(body["rotation"], ["b1"])
         self.assertEqual(body["drains"], 1)
-        self.assertEqual(body["audit_count"], 2)
+        self.assertEqual(body["audit_count"], 10)
         self.assertTrue(body["ph_stable"])
         self.assertEqual(body["ph_adjustment"], 0.0)
+
+        status, history = self.call("GET", "/cycle/history")
+        self.assertEqual(status, 200)
+        self.assertEqual(history["cycles"], [])
+        status, _ = self.call(
+            "POST",
+            "/cycle",
+            {
+                "cycle_id": "second",
+                "flow": 1.0,
+                "samples": [],
+                "demand": 0.0,
+                "level": 1.0,
+                "bed_id": "",
+                "zone": 1,
+                "amount": 1.0,
+            },
+        )
+        self.assertEqual(status, 200)
+        status, history = self.call("GET", "/cycle/history")
+        self.assertEqual(status, 200)
+        self.assertEqual([cycle["cycle_id"] for cycle in history["cycles"]], [body["cycle_id"]])
 
         status, body = self.call("POST", "/simulate", {"ticks": 3})
         self.assertEqual(status, 200)
@@ -238,6 +266,158 @@ class ConsoleCase(unittest.TestCase):
         self.assertEqual(body["last_stage"], "audit")
         status, body = self.call("POST", "/simulate", {})
         self.assertEqual(len(body["ticks"]), 5)
+
+    def test_cycle_checkpoint_and_durable_recovery(self) -> None:
+        self.call("POST", "/filter/add", {"id": "b1", "zone": 1, "load": 3.0})
+        payload = {
+            "cycle_id": "durable-1",
+            "flow": 800.0,
+            "samples": [2.0, 4.0],
+            "demand": 0.5,
+            "level": 10.0,
+            "bed_id": "missing-bed",
+            "zone": 1,
+            "amount": 12.0,
+        }
+
+        status, body = self.call("POST", "/cycle", payload)
+        self.assertEqual(status, 409)
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["failure_policy"], "retain_completed_and_stop")
+        self.assertEqual(body["recovery_policy"], "operator_confirmation_required")
+        self.assertEqual(body["current_index"], 3)
+        self.assertEqual(body["steps"][3]["status"], "failed")
+        self.assertIn("missing-bed", body["steps"][3]["error"])
+        self.assertEqual(body["coag_dose"], 800.0)
+        self.assertEqual(body["chlor_dose"], 0.65)
+        self.assertEqual(body["quota"], 0.0)
+        self.assertEqual(body["drains"], 0)
+
+        status, body = self.call("GET", "/cycle")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["cycle_id"], "durable-1")
+        self.assertEqual(body["steps"][1]["result"]["coag_dose"], 800.0)
+
+        status, body = self.call("POST", "/cycle", payload)
+        self.assertEqual(status, 409)
+        self.assertIn("recovery", body["error"])
+
+        status, body = self.call("POST", "/cycle/recover", {})
+        self.assertEqual(status, 409)
+        self.assertIn("confirmed", body["error"])
+        status, body = self.call("POST", "/cycle/recover", {"confirmed": True})
+        self.assertEqual(status, 409)
+        self.assertIn("operator", body["error"])
+
+        status, body = self.call(
+            "POST",
+            "/cycle/recover",
+            {"cycle_id": "durable-1", "confirmed": True, "operator": "duty-1"},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(body["status"], "failed")
+
+        status, _ = self.call(
+            "POST", "/filter/add", {"id": "missing-bed", "zone": 1, "load": 3.0}
+        )
+        self.assertEqual(status, 200)
+        status, body = self.call(
+            "POST",
+            "/cycle/recover",
+            {"cycle_id": "durable-1", "confirmed": True, "operator": "duty-1"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "completed")
+        self.assertEqual(body["quota"], 12.0)
+        self.assertEqual(body["drains"], 1)
+        self.assertEqual(body["audit_count"], 14)
+        status, totals = self.call("GET", "/audit/totals")
+        self.assertEqual(status, 200)
+        self.assertEqual(totals["totals"]["coagulant"], 800.0)
+        self.assertEqual(totals["totals"]["chlorine"], 0.65)
+        self.assertEqual(body["recoveries"][-1]["operator"], "duty-1")
+        status, history = self.call("GET", "/cycle/history")
+        self.assertEqual(status, 200)
+        self.assertEqual(history["cycles"], [])
+
+    def test_cycle_stops_at_ph_gate_and_does_not_dose_chlorine(self) -> None:
+        status, _ = self.call("POST", "/ph/read", {"value": 5.0})
+        self.assertEqual(status, 200)
+        payload = {
+            "cycle_id": "ph-gate",
+            "flow": 100.0,
+            "samples": [],
+            "demand": 1.0,
+            "level": 8.0,
+            "bed_id": "",
+            "zone": 1,
+            "amount": 1.0,
+        }
+        status, body = self.call("POST", "/cycle", payload)
+        self.assertEqual(status, 409)
+        self.assertEqual(body["status"], "blocked")
+        self.assertEqual(body["current_index"], 2)
+        self.assertEqual(body["steps"][2]["status"], "blocked")
+        self.assertEqual(body["chlor_dose"], 0.0)
+        self.assertEqual(body["ph_stable"], False)
+
+        status, _ = self.call(
+            "POST",
+            "/cycle/recover",
+            {"cycle_id": "ph-gate", "confirmed": True, "operator": "duty-2"},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(_["status"], "blocked")
+
+        status, _ = self.call("POST", "/ph/read", {"value": 7.0})
+        self.assertEqual(status, 200)
+        status, body = self.call(
+            "POST",
+            "/cycle/recover",
+            {"cycle_id": "ph-gate", "confirmed": True, "operator": "duty-2"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "completed")
+        self.assertEqual(body["chlor_dose"], 1.0)
+        self.assertEqual(body["coag_dose"], 100.0)
+
+    def test_cycle_checkpoint_survives_console_restart(self) -> None:
+        payload = {
+            "cycle_id": "restart-gate",
+            "flow": 10.0,
+            "samples": [],
+            "demand": 0.0,
+            "level": 1.0,
+            "bed_id": "",
+            "zone": 1,
+            "amount": 1.0,
+        }
+        status, _ = self.call("POST", "/ph/read", {"value": 5.0})
+        self.assertEqual(status, 200)
+        status, blocked = self.call("POST", "/cycle", payload)
+        self.assertEqual(status, 409)
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["chlor_dose"], 0.0)
+
+        self.store.close()
+        restarted_store = Store.open(self.store.path)
+        restarted = Server(restarted_store)
+        response = restarted.dispatch("GET", "/cycle")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.body)["status"], "blocked")
+
+        restarted.dispatch("POST", "/ph/read", {"value": 7.0})
+        response = restarted.dispatch(
+            "POST",
+            "/cycle/recover",
+            {"cycle_id": "restart-gate", "confirmed": True, "operator": "duty-restart"},
+        )
+        body = json.loads(response.body)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["status"], "completed")
+        self.assertEqual(body["coag_dose"], 10.0)
+        self.assertEqual(body["chlor_dose"], 0.3)
+        restarted_store.close()
 
     def test_ph_and_schedule_routes(self) -> None:
         status, body = self.call("GET", "/ph")
@@ -338,7 +518,7 @@ class ConsoleCase(unittest.TestCase):
         self.call("POST", "/coag/dose", {"flow": 5.0})
         status, body = self.call("GET", "/export/audit")
         self.assertEqual(status, 200)
-        self.assertIn("time,kind,detail,id", body)
+        self.assertIn("time,kind,detail,id,key", body)
         self.assertIn("coagulant", body)
 
         status, body = self.call("GET", "/export/telemetry")

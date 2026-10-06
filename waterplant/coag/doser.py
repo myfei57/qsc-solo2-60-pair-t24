@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from waterplant.audit import Auditor
 from waterplant.flow import Calibration
-from waterplant.intake import FlowRepository
+from waterplant.intake import FLOW_KEY, FlowRepository
 from waterplant.store.store import Store
 
 from .report import DoseState
@@ -16,6 +16,7 @@ class Doser:
     """Turns a flow reading into a coagulant dose at the current ratio."""
 
     def __init__(self, store: Store) -> None:
+        self._store = store
         self._flow = FlowRepository(store)
         self._calibration = Calibration(store)
         self._auditor = Auditor(store)
@@ -48,6 +49,17 @@ class Doser:
         dose = self.dose_from_persisted_flow()
         self._auditor.record(COAGULANT, f"{dose:.4f}")
         return dose
+
+    def update_flow_and_dose_idempotent(self, value: float, key: str) -> tuple[float, bool]:
+        """Persist flow and its dose audit once for the supplied step key."""
+
+        existing = self._auditor.entry_for_key(key)
+        if existing is not None:
+            return float(existing.detail), False
+        dose = self.dose_for_flow(value)
+        entry = self._auditor.make_entry(COAGULANT, f"{dose:.4f}", key)
+        self._auditor.append_entries_atomically([entry], {FLOW_KEY: f"{value:.4f}"})
+        return dose, True
 
     def dose_plan(self, flow: float, turbidity: float) -> float:
         """Blend flow and turbidity into a planning dose."""
