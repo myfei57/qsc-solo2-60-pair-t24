@@ -7,6 +7,7 @@ from waterplant.backwash import Controller
 from waterplant.chlor import Doser as ChlorDoser
 from waterplant.clearwell import Well
 from waterplant.coag import Doser as CoagDoser
+from waterplant.cycle import CycleManager
 from waterplant.filter import Bank
 from waterplant.flow import Calibration
 from waterplant.intake import FlowRepository, InletController, Trend
@@ -22,7 +23,7 @@ class Runtime:
     """Owns one instance of each control component for a single store."""
 
     def __init__(self, store: Store) -> None:
-        bank = Bank()
+        bank = Bank(store)
         coag_doser = CoagDoser(store)
         self.store = store
         self.flow_repository = FlowRepository(store)
@@ -41,3 +42,5 @@ class Runtime:
         self.scheduler = Scheduler(store)
         self.trend = Trend(store)
         self.inventory = Inventory(store)
+        # Built last: the cycle manager orchestrates every component above.
+        self.cycles = CycleManager(self)

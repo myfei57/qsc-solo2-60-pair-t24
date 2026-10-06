@@ -22,7 +22,14 @@ from . import describe as describe_module
 from . import simulate as simulate_module
 from . import snapshot as snapshot_module
 from . import telemetry as telemetry_module
-from .cycle import run_cycle
+from .cycle import (
+    cycle,
+    cycle_abort,
+    cycle_events,
+    cycle_history,
+    cycle_resume,
+    cycle_status,
+)
 from .http import Request, Response, csv_response, json_response, text_response
 from .report import text_report
 from .routes import route_table
@@ -277,10 +284,6 @@ def audit_summary(server: "Server", request: Request) -> Response:
 def audit_filter(server: "Server", request: Request) -> Response:
     entries = server.runtime.auditor.filter(request.str_field("kind"))
     return json_response({"entries": [entry.as_dict() for entry in entries]})
-
-
-def cycle(server: "Server", request: Request) -> Response:
-    return run_cycle(server.runtime, request)
 
 
 def simulate(server: "Server", request: Request) -> Response:

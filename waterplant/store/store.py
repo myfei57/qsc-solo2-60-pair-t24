@@ -54,6 +54,21 @@ class Store:
             self._data[key] = value
             self._save_locked()
 
+    def put_many(self, values: dict[str, str | None]) -> None:
+        """Write or delete several keys in one atomic document save.
+
+        A value of ``None`` deletes the key. Every key lands in the same
+        document replacement, so a crash either shows all changes or none.
+        """
+
+        with self._lock:
+            for key, value in values.items():
+                if value is None:
+                    self._data.pop(key, None)
+                else:
+                    self._data[key] = value
+            self._save_locked()
+
     def delete(self, key: str) -> None:
         with self._lock:
             if key not in self._data:

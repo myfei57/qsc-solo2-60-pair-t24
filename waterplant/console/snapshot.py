@@ -6,14 +6,17 @@ from waterplant.ns import treatment_line
 from waterplant.store import store_state
 
 from .runtime import Runtime
+from waterplant.cycle import cycle_detail
 
 
 def collect(rt: Runtime) -> dict[str, object]:
     """Combine every component projection into one document."""
 
+    active = rt.cycles.active()
     return {
         "pipeline": [step.as_dict() for step in treatment_line().steps()],
         "store": store_state(rt.store).as_dict(),
+        "cycle": None if active is None else cycle_detail(active),
         "intake": rt.flow_repository.state().as_dict(),
         "coag": rt.coag_doser.state().as_dict(),
         "chlor": rt.chlor_doser.state().as_dict(),

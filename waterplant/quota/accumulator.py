@@ -8,6 +8,7 @@ from waterplant.store.store import Store
 from .report import AccumState
 
 ACCUM_KEY = "quota:chlorine-accumulator"
+IDEMPOTENCY_KEY_PREFIX = "quota:cycle-dose:"
 EPOCH_CAP = 100.0
 
 
@@ -19,6 +20,24 @@ class Accumulator:
 
     def add(self, amount: float) -> float:
         return advance_epoch(self._store, ACCUM_KEY, amount, EPOCH_CAP)
+
+    def add_once(self, amount: float, ref: str) -> tuple[float, bool]:
+        """Add ``amount`` once per ``ref``, atomically with its dedupe marker.
+
+        Returns the accumulator value and whether the amount was added on this
+        call. A retried or resumed cycle step with the same ref does not add
+        the amount a second time.
+        """
+
+        marker = f"{IDEMPOTENCY_KEY_PREFIX}{ref}"
+        if self._store.get(marker)[1]:
+            return self.value(), False
+        current, _ = load_float(self._store, ACCUM_KEY)
+        next_value = current + amount
+        if EPOCH_CAP > 0 and next_value >= EPOCH_CAP:
+            next_value -= EPOCH_CAP
+        self._store.put_many({ACCUM_KEY: f"{next_value:.4f}", marker: f"{amount:.4f}"})
+        return next_value, True
 
     def value(self) -> float:
         value, _ = load_float(self._store, ACCUM_KEY)

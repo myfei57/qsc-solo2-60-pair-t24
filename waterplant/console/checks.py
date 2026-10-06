@@ -36,4 +36,17 @@ def run_checks(rt: Runtime) -> list[dict[str, str]]:
         )
     else:
         checks.append({"name": "inventory", "status": "ok", "detail": "stock above reorder level"})
+    active = rt.cycles.active()
+    if active is None:
+        checks.append({"name": "cycle", "status": "ok", "detail": "no active cycle"})
+    elif active.status == "interrupted":
+        checks.append(
+            {
+                "name": "cycle",
+                "status": "warn",
+                "detail": f"interrupted at {active.breakpoint} ({active.interrupt_reason})",
+            }
+        )
+    else:
+        checks.append({"name": "cycle", "status": "ok", "detail": f"cycle {active.status}"})
     return checks

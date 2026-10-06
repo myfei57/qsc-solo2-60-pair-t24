@@ -33,6 +33,20 @@ class Doser:
         self._auditor.record(CHLORINE, f"{dose:.4f}")
         return dose
 
+    def apply_once(self, ref: str) -> tuple[float, bool]:
+        """Apply the residual dose once per ``ref``.
+
+        A repeated or resumed call returns the already applied dose instead
+        of dosing a second time.
+        """
+
+        dose = self.dose_for_residual()
+        entry, applied = self._auditor.record_once(CHLORINE, f"{dose:.4f}", ref)
+        try:
+            return float(entry.detail), applied
+        except ValueError:
+            return dose, applied
+
     def target_for_demand(self, demand: float) -> float:
         return 0.3 + demand * 0.7
 

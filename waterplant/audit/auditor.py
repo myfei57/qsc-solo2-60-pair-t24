@@ -23,9 +23,13 @@ class Entry:
     time: str
     kind: str
     detail: str
+    ref: str = ""
 
     def as_dict(self) -> dict[str, str]:
-        return {"id": self.id, "time": self.time, "kind": self.kind, "detail": self.detail}
+        payload = {"id": self.id, "time": self.time, "kind": self.kind, "detail": self.detail}
+        if self.ref:
+            payload["ref"] = self.ref
+        return payload
 
 
 class Auditor:
@@ -34,15 +38,32 @@ class Auditor:
     def __init__(self, store: Store) -> None:
         self._store = store
 
-    def record(self, kind: str, detail: str) -> Entry:
+    def record(self, kind: str, detail: str, ref: str = "") -> Entry:
+        if ref:
+            existing = self.find_by_ref(ref)
+            if existing is not None:
+                return existing
         entry = Entry(
             id=uuid.uuid4().hex,
             time=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             kind=kind,
             detail=detail,
+            ref=ref,
         )
         append_command(self._store, AUDIT_KEY, json.dumps(entry.as_dict(), ensure_ascii=False))
         return entry
+
+    def record_once(self, kind: str, detail: str, ref: str) -> tuple[Entry, bool]:
+        """Record a dose keyed by ``ref`` and report whether it was new.
+
+        ``True`` means the dose was just applied; ``False`` means an entry
+        with the same ref already existed and no second dose was recorded.
+        """
+
+        existing = self.find_by_ref(ref)
+        if existing is not None:
+            return existing, False
+        return self.record(kind, detail, ref), True
 
     def entries(self) -> list[Entry]:
         entries: list[Entry] = []
@@ -59,9 +80,20 @@ class Auditor:
                     time=str(payload.get("time", "")),
                     kind=str(payload.get("kind", "")),
                     detail=str(payload.get("detail", "")),
+                    ref=str(payload.get("ref", "")),
                 )
             )
         return entries
+
+    def find_by_ref(self, ref: str) -> Entry | None:
+        """Return the entry already recorded under ``ref`` for idempotency."""
+
+        if not ref:
+            return None
+        for entry in self.entries():
+            if entry.ref == ref:
+                return entry
+        return None
 
     def last(self) -> Entry | None:
         entries = self.entries()

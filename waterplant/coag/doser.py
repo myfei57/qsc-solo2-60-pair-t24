@@ -49,6 +49,22 @@ class Doser:
         self._auditor.record(COAGULANT, f"{dose:.4f}")
         return dose
 
+    def dose_once(self, value: float, ref: str) -> tuple[float, bool]:
+        """Persist flow and record the dose once per ``ref``.
+
+        Returns the dose and whether it was applied on this call. A repeated
+        call with the same ``ref`` (a retried or resumed cycle step) returns
+        the already recorded dose without dosing again.
+        """
+
+        self._flow.persist_flow(value)
+        dose = self.dose_from_persisted_flow()
+        entry, applied = self._auditor.record_once(COAGULANT, f"{dose:.4f}", ref)
+        try:
+            return float(entry.detail), applied
+        except ValueError:
+            return dose, applied
+
     def dose_plan(self, flow: float, turbidity: float) -> float:
         """Blend flow and turbidity into a planning dose."""
 

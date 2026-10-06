@@ -45,6 +45,7 @@ class ConsoleCase(unittest.TestCase):
             "intake",
             "ph",
             "inventory",
+            "cycle",
         })
 
         status, snapshot = self.call("GET", "/snapshot")
@@ -54,6 +55,7 @@ class ConsoleCase(unittest.TestCase):
             {
                 "pipeline",
                 "store",
+                "cycle",
                 "intake",
                 "coag",
                 "chlor",
